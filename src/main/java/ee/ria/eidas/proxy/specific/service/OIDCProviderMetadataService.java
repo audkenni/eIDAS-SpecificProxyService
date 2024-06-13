@@ -1,5 +1,6 @@
 package ee.ria.eidas.proxy.specific.service;
 
+import com.nimbusds.jose.util.DefaultResourceRetriever;
 import com.nimbusds.oauth2.sdk.http.HTTPRequest;
 import com.nimbusds.oauth2.sdk.http.HTTPResponse;
 import com.nimbusds.oauth2.sdk.id.ClientID;
@@ -87,7 +88,8 @@ public class OIDCProviderMetadataService {
                 log.warn("JWKS URL returned by OpenID Connect provider metadata is not using HTTPS protocol: {}",
                         jwkSetURL);
             }
-            IDTokenValidator validator = new IDTokenValidator(iss, clientID, RS256, jwkSetURL);
+            DefaultResourceRetriever resourceRetriever = new DefaultResourceRetriever(5000, 5000);
+            IDTokenValidator validator = new IDTokenValidator(iss, clientID, RS256, jwkSetURL, resourceRetriever);
             validator.setMaxClockSkew(specificProxyServiceProperties.getOidc().getMaxClockSkewInSeconds());
             log.info("Successfully updated OIDC token validator for issuer: {}", specificProxyServiceProperties.getOidc().getIssuerUrl());
             return validator;

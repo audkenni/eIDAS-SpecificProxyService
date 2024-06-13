@@ -8,6 +8,7 @@ import ee.ria.eidas.proxy.specific.error.RequestDeniedException;
 import ee.ria.eidas.proxy.specific.service.SpecificProxyService;
 import ee.ria.eidas.proxy.specific.storage.EidasNodeCommunication;
 import ee.ria.eidas.proxy.specific.storage.SpecificProxyServiceCommunication;
+import ee.ria.eidas.proxy.specific.storage.SpecificProxyServiceCommunication.CorrelatedRequestsHolder;
 import eu.eidas.auth.commons.EidasParameterKeys;
 import eu.eidas.auth.commons.attribute.AttributeDefinition;
 import eu.eidas.auth.commons.attribute.AttributeRegistry;
@@ -81,7 +82,9 @@ public class IdpResponseController {
 			throw new BadRequestException("Either error or code parameter can be present in a callback request. Both code and error parameters found");
 		}
 
-		ILightRequest originalLightRequest = specificProxyServiceCommunication.getAndRemoveIdpRequest(state);
+		CorrelatedRequestsHolder correlatedRequestsHolder = specificProxyServiceCommunication.getAndRemoveIdpRequest(state);
+		ILightRequest originalLightRequest = correlatedRequestsHolder.getLightRequest();
+
 		if (originalLightRequest == null) {
 			throw new BadRequestException("Invalid state");
 		}
@@ -97,7 +100,8 @@ public class IdpResponseController {
 		log.info("Handling successful authentication callback from Idp: {}", idpCallbackRequest);
 		ILightResponse lightResponse = specificProxyService.queryIdpForRequestedAttributes(
 				oAuthCode,
-				originalLightRequest);
+				originalLightRequest,
+				correlatedRequestsHolder.getCodeVerifier());
 
 		return processIdpAuthenticationResponse(model, originalLightRequest, lightResponse);
 	}

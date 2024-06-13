@@ -1,5 +1,6 @@
 package ee.ria.eidas.proxy.specific.web;
 
+import com.nimbusds.oauth2.sdk.pkce.CodeVerifier;
 import ee.ria.eidas.proxy.specific.storage.SpecificProxyServiceCommunication.CorrelatedRequestsHolder;
 import eu.eidas.auth.commons.light.ILightRequest;
 import io.restassured.RestAssured;
@@ -623,8 +624,9 @@ abstract class IdpResponseControllerTests extends ControllerTest {
 
 	Map.Entry<String, CorrelatedRequestsHolder> addMockRequestToPendingIdpRequestCommunicationCache(ILightRequest lightRequest) throws MalformedURLException {
 		String stateParameterValue = UUID.randomUUID().toString();
-		CorrelatedRequestsHolder requestsHolder = new CorrelatedRequestsHolder(lightRequest, Collections.singletonMap(stateParameterValue, new URL("http://oidAuthenticationRequest")));
-		Map.Entry<String, CorrelatedRequestsHolder> mapEntry = new AbstractMap.SimpleEntry<String, CorrelatedRequestsHolder>(stateParameterValue, requestsHolder);
+		CodeVerifier codeVerifier = new CodeVerifier();
+		CorrelatedRequestsHolder requestsHolder = new CorrelatedRequestsHolder(lightRequest, Collections.singletonMap(stateParameterValue, new URL("http://oidAuthenticationRequest")), codeVerifier);
+		Map.Entry<String, CorrelatedRequestsHolder> mapEntry = new AbstractMap.SimpleEntry<>(stateParameterValue, requestsHolder);
 		getIdpRequestCommunicationCache().put(stateParameterValue, requestsHolder);
 		return mapEntry;
 	}

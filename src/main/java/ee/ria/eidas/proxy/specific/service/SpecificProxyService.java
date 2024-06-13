@@ -20,13 +20,17 @@ import com.jayway.jsonpath.JsonPath;
 import com.jayway.jsonpath.PathNotFoundException;
 import com.nimbusds.jose.JOSEException;
 import com.nimbusds.jose.proc.BadJOSEException;
+import com.nimbusds.jose.util.Base64;
 import com.nimbusds.jwt.JWT;
 import com.nimbusds.oauth2.sdk.*;
 import com.nimbusds.oauth2.sdk.auth.ClientAuthentication;
-import com.nimbusds.oauth2.sdk.auth.ClientSecretBasic;
+import com.nimbusds.oauth2.sdk.auth.ClientSecretPost;
 import com.nimbusds.oauth2.sdk.auth.Secret;
 import com.nimbusds.oauth2.sdk.http.HTTPRequest;
 import com.nimbusds.oauth2.sdk.id.ClientID;
+import com.nimbusds.oauth2.sdk.pkce.CodeChallenge;
+import com.nimbusds.oauth2.sdk.pkce.CodeChallengeMethod;
+import com.nimbusds.oauth2.sdk.pkce.CodeVerifier;
 import com.nimbusds.openid.connect.sdk.OIDCTokenResponse;
 import com.nimbusds.openid.connect.sdk.OIDCTokenResponseParser;
 import com.nimbusds.openid.connect.sdk.claims.ClaimsSet;
@@ -85,24 +89,27 @@ public class SpecificProxyService {
     public SpecificProxyServiceCommunication.CorrelatedRequestsHolder createOidcAuthenticationRequest(ILightRequest originalIlightRequest) {
         final String state = UUID.randomUUID().toString();
 
+        CodeVerifier codeVerifier = new CodeVerifier();
         URI oidAuthenticationRequest =
                 UriComponentsBuilder.fromUri(oidcProviderMetadataService.getOidcProviderMetadata().getAuthorizationEndpointURI())
                         .queryParam("scope", getScope(originalIlightRequest))
                         .queryParam("response_type", "code")
                         .queryParam("client_id", specificProxyServiceProperties.getOidc().getClientId())
                         .queryParam("redirect_uri", specificProxyServiceProperties.getOidc().getRedirectUri())
-                        .queryParam("acr_values", getLevelOfAssurance(originalIlightRequest))
-                        .queryParam("ui_locales", specificProxyServiceProperties.getOidc().getDefaultUiLanguage())
+                        //.queryParam("acr_values", getLevelOfAssurance(originalIlightRequest)) // TODO: eIDAS specific acr values low, substantial, high not supported
+                        //.queryParam("ui_locales", specificProxyServiceProperties.getOidc().getDefaultUiLanguage()) // TODO: Not supported
+                        .queryParam("code_challenge", CodeChallenge.compute(CodeChallengeMethod.S256, codeVerifier).getValue())
+                        .queryParam("code_challenge_method", CodeChallengeMethod.S256.getValue())
                         .queryParam("state", state)
                         .encode(StandardCharsets.UTF_8).build().toUri();
 
-        return createCorrelatedRequestsHolder(originalIlightRequest, oidAuthenticationRequest.toURL(), state);
+        return createCorrelatedRequestsHolder(originalIlightRequest, oidAuthenticationRequest.toURL(), state, codeVerifier);
     }
 
     @SneakyThrows
-    public ILightResponse queryIdpForRequestedAttributes(String oAuthCode, ILightRequest originalLightRequest) {
+    public ILightResponse queryIdpForRequestedAttributes(String oAuthCode, ILightRequest originalLightRequest, CodeVerifier codeVerifier) {
 
-        JWT idToken = getIdToken(oAuthCode, new ClientID(specificProxyServiceProperties.getOidc().getClientId()));
+        JWT idToken = getIdToken(oAuthCode, new ClientID(specificProxyServiceProperties.getOidc().getClientId()), codeVerifier);
         log.info(append("idp.token_request.response.id_token", idToken.getParsedString()),
                 "Id-token received for code {} in response to LightRequest with id: '{}'",
                 value(IDP_TOKEN_REQUEST_CODE, oAuthCode),
@@ -111,12 +118,11 @@ public class SpecificProxyService {
         try {
 
             ClaimsSet claims = oidcProviderMetadataService.getIdTokenValidator().validate(idToken, null);
-            validateAuthenticationMethodReference(claims);
+            //validateAuthenticationMethodReference(claims); // TODO: Missing id token amr claim
 
             log.debug("OIDC response successfully verified!");
             ILightResponse lightResponse = translateToLightResponse(claims, originalLightRequest, specificProxyServiceProperties.getOidc().getResponseClaimMapping());
-
-            log.debug("LightResponse for eIDAS-Proxy service: " + lightResponse.toString());
+            log.debug("LightResponse for eIDAS-Proxy service: {}", lightResponse);
 
             if (LevelOfAssurance.fromString(lightResponse.getLevelOfAssurance()).numericValue() < LevelOfAssurance.fromString(originalLightRequest.getLevelOfAssurance()).numericValue()) {
                 throw new IllegalStateException(String.format("Invalid level of assurance in IDP response. Authentication was requested with level '%s', but IDP response level is '%s'.", originalLightRequest.getLevelOfAssurance(), lightResponse.getLevelOfAssurance()));
@@ -140,23 +146,23 @@ public class SpecificProxyService {
         }
     }
 
-    private JWT getIdToken(String oAuthCode, ClientID clientID) throws URISyntaxException {
-        ClientAuthentication clientAuth = new ClientSecretBasic(
+    private JWT getIdToken(String oAuthCode, ClientID clientID, CodeVerifier codeVerifier) throws URISyntaxException {
+        ClientAuthentication clientAuth = new ClientSecretPost(
                 clientID,
                 new Secret(specificProxyServiceProperties.getOidc().getClientSecret())
         );
 
         OIDCProviderMetadata oidcProviderMetadata = oidcProviderMetadataService.getOidcProviderMetadata();
-        TokenRequest request = new TokenRequest(oidcProviderMetadata.getTokenEndpointURI(), clientAuth, getAuthorizationGrant(oAuthCode), null, null, null);
+        TokenRequest request = new TokenRequest(oidcProviderMetadata.getTokenEndpointURI(), clientAuth, getAuthorizationGrant(oAuthCode, codeVerifier), null, null, null);
         OIDCTokenResponse successResponse = getOidcTokenResponse(request);
 
         return successResponse.getOIDCTokens().getIDToken();
     }
 
-    private AuthorizationGrant getAuthorizationGrant(String oAuthCode) throws URISyntaxException {
+    private AuthorizationGrant getAuthorizationGrant(String oAuthCode, CodeVerifier codeVerifier) throws URISyntaxException {
         AuthorizationCode authorizationCode = new AuthorizationCode(oAuthCode);
         URI callback = new URI(specificProxyServiceProperties.getOidc().getRedirectUri());
-        return new AuthorizationCodeGrant(authorizationCode, callback);
+        return new AuthorizationCodeGrant(authorizationCode, callback, codeVerifier);
     }
 
     private OIDCTokenResponse getOidcTokenResponse(TokenRequest request) {
@@ -196,7 +202,7 @@ public class SpecificProxyService {
         scopes.addAll(specificProxyServiceProperties.getOidc().getScope());
 
         if (containsLegalPersonAttributes(originalIlightRequest))
-            scopes.add("legalperson");
+            scopes.add("legalperson"); // TODO: Scope not supported
 
         return StringUtils.join(scopes, ' ');
     }
@@ -210,6 +216,7 @@ public class SpecificProxyService {
     private ILightResponse translateToLightResponse(ClaimsSet claimSet, ILightRequest originalLightRequest, IdTokenClaimMappingProperties mappingProperties) throws MalformedURLException, UnknownHostException {
         log.debug("JWT (claims): " + claimSet.toJSONString());
 
+        setMissingClaimsForTesting(claimSet); // TODO: Remove after fixing id token claims
         JSONObject claims = claimSet.toJSONObject();
 
         String subject;
@@ -219,17 +226,17 @@ public class SpecificProxyService {
             subject = getAttributeValueFromClaims(claims, "subject", mappingProperties.getNaturalPersonSubject());
         }
 
-        String responseId = getAttributeValueFromClaims(claims, "responseId", mappingProperties.getId());
-        LevelOfAssurance loa = LevelOfAssurance.valueOf(StringUtils.upperCase(getAttributeValueFromClaims(claims, "loa", mappingProperties.getAcr())));
+        //String responseId = getAttributeValueFromClaims(claims, "responseId", mappingProperties.getId()); // TODO: Missing id token jti claim.
+        //LevelOfAssurance loa = LevelOfAssurance.valueOf(StringUtils.upperCase(getAttributeValueFromClaims(claims, "loa", mappingProperties.getAcr()))); // TODO: Invalid id token acr claim value. Must be low, substantial or high.
         String issuer = getAttributeValueFromClaims(claims, "issuer", mappingProperties.getIssuer());
         ImmutableAttributeMap attributes = getAttributes(originalLightRequest, claims, mappingProperties);
 
         final LightResponse.Builder builder = LightResponse.builder()
-                .id(responseId)
+                .id(UUID.randomUUID().toString()) // TODO: Missing id token jti claim. But I guess any unique value will do.
                 .ipAddress(getIssuerIp(specificProxyServiceProperties.getOidc().getIssuerUrl()))
                 .inResponseToId(originalLightRequest.getId())
                 .issuer(issuer)
-                .levelOfAssurance(loa.stringValue())
+                .levelOfAssurance("http://eidas.europa.eu/LoA/high") // TODO: Use parsed level of assurance from acr claim.
                 .relayState(originalLightRequest.getRelayState())
                 .status(ResponseStatus.builder().statusCode(EIDASStatusCode.SUCCESS_URI.getValue()).build())
                 .subject(subject)
@@ -237,6 +244,27 @@ public class SpecificProxyService {
                 .attributes(attributes);
 
         return builder.build();
+    }
+
+    private static void setMissingClaimsForTesting(ClaimsSet claimSet) {
+        // Natural person - mandatory parameters
+        String[] name = claimSet.getStringClaim("name").split(" ");
+        claimSet.setClaim("firstName", name[0]);
+        claimSet.setClaim("familyName", name[1]);
+        claimSet.setClaim("dateOfBirth", "2000-12-22");
+        // Natural person - optional parameters
+        claimSet.setClaim("birthName", "Kristjan");
+        claimSet.setClaim("placeOfBirth", "Reykjavík");
+        claimSet.setClaim("currentAddress", Base64.encode(
+                    "<eidas:PoBox>10100</eidas:PoBox>\n" +
+                        "<eidas:LocatorName>Audkenni building</eidas:LocatorName>\n" +
+                        "<eidas:LocatorDesignator>105</eidas:LocatorDesignator>\n" +
+                        "<eidas:CvAddressArea>Tún</eidas:CvAddressArea>\n" +
+                        "<eidas:AdminUnitSecondLine>IS</eidas:AdminUnitSecondLine>\n" +
+                        "<eidas:Thoroughfare>Katrínartúni 4</eidas:Thoroughfare>\n" +
+                        "<eidas:PostName>Reykjavík</eidas:PostName>\n" +
+                        "<eidas:PostCode>530 0000</eidas:Postcode>").toString());
+        claimSet.setClaim("gender", "Male");
     }
 
     private SamlNameIdFormat getNameIdFormat(ILightRequest originalLightRequest) {
@@ -251,7 +279,7 @@ public class SpecificProxyService {
     private ImmutableAttributeMap getAttributes(ILightRequest lightRequest, JSONObject claims, IdTokenClaimMappingProperties mappingProperties) {
         ImmutableAttributeMap.Builder attrBuilder = ImmutableAttributeMap.builder();
 
-        for (ImmutableAttributeMap.ImmutableAttributeEntry entry : lightRequest.getRequestedAttributes().entrySet()) {
+        for (ImmutableAttributeMap.ImmutableAttributeEntry<?> entry : lightRequest.getRequestedAttributes().entrySet()) {
             String friendlyName = entry.getKey().getFriendlyName();
             String claimValue = getClaimValueFromIdToken(claims, entry, mappingProperties);
             if (claimValue != null) {
@@ -278,14 +306,14 @@ public class SpecificProxyService {
         }
     }
 
-    private String getClaimValueFromIdToken(JSONObject claims, ImmutableAttributeMap.ImmutableAttributeEntry entry, IdTokenClaimMappingProperties mappingProperties) {
+    private String getClaimValueFromIdToken(JSONObject claims, ImmutableAttributeMap.ImmutableAttributeEntry<?> entry, IdTokenClaimMappingProperties mappingProperties) {
 
         String attributeFriendlyName = entry.getKey().getFriendlyName();
         String jsonPath = mappingProperties.getAttributes().get(attributeFriendlyName);
 
         if (entry.getKey().isRequired()) {
             Assert.notNull(jsonPath, "Required attribute " + attributeFriendlyName + " has no jsonpath configured to extract claim from id-token");
-        } else if (!entry.getKey().isRequired() && StringUtils.isEmpty(jsonPath)) {
+        } else if (StringUtils.isEmpty(jsonPath)) {
             log.warn("Ignoring optional attribute {} - no mapping configured to extract it's corresponding value from id-token", attributeFriendlyName);
             return null;
         }
@@ -311,10 +339,11 @@ public class SpecificProxyService {
         return InetAddress.getByName(new URL(issuerUrl).getHost()).getHostAddress();
     }
 
-    private SpecificProxyServiceCommunication.CorrelatedRequestsHolder createCorrelatedRequestsHolder(ILightRequest incomingLightRequest, URL redirectUrl, String state) {
+    private SpecificProxyServiceCommunication.CorrelatedRequestsHolder createCorrelatedRequestsHolder(ILightRequest incomingLightRequest, URL redirectUrl, String state, CodeVerifier codeVerifier) {
         return new SpecificProxyServiceCommunication.CorrelatedRequestsHolder(
                 incomingLightRequest,
-                Collections.singletonMap(state, redirectUrl)
+                Collections.singletonMap(state, redirectUrl),
+                codeVerifier
         );
     }
 

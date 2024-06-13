@@ -1,5 +1,6 @@
 package ee.ria.eidas.proxy.specific.storage;
 
+import com.nimbusds.oauth2.sdk.pkce.CodeVerifier;
 import ee.ria.eidas.proxy.specific.config.SpecificProxyServiceProperties;
 import ee.ria.eidas.proxy.specific.error.BadRequestException;
 import eu.eidas.auth.commons.exceptions.SecurityEIDASException;
@@ -116,17 +117,15 @@ public class SpecificProxyServiceCommunication {
         }
     }
 
-    public ILightRequest getAndRemoveIdpRequest(String inResponseToId) {
+    public CorrelatedRequestsHolder getAndRemoveIdpRequest(String inResponseToId) {
         CorrelatedRequestsHolder correlatedRequestsHolder = idpRequestCommunicationCache.getAndRemove(inResponseToId);
 
         if (correlatedRequestsHolder != null) {
-            ILightRequest originalLightRequest = correlatedRequestsHolder.getLightRequest();
-
             if (log.isInfoEnabled())
                 log.info(append(IGNITE_CACHE_NAME, idpRequestCommunicationCache.getName()),
                         "Pending IDP request retrieved from cache for id: '{}'",
                         value(IDP_REQUEST_LIGHT_TOKEN_ID, inResponseToId));
-            return originalLightRequest;
+            return correlatedRequestsHolder;
         } else {
 
             if (log.isWarnEnabled())
@@ -141,21 +140,23 @@ public class SpecificProxyServiceCommunication {
     /**
      * Holds the light request and the correlated specific IDP request.
      */
+    @Getter
     public static class CorrelatedRequestsHolder implements Serializable {
 
         private static final long serialVersionUID = 8942548697342198159L;
 
-        @Getter
         private final ILightRequest lightRequest;
 
-        @Getter
         private final Map<String, URL> authenticationRequest;
 
-        public CorrelatedRequestsHolder(ILightRequest lightRequest, Map<String, URL> authenticationRequest) {
+        private final CodeVerifier codeVerifier;
+
+        public CorrelatedRequestsHolder(ILightRequest lightRequest, Map<String, URL> authenticationRequest, CodeVerifier codeVerifier) {
             Assert.notNull(lightRequest, "Original LightRequest missing!");
             Assert.notNull(authenticationRequest, "IDP authentication request missing!");
             this.lightRequest = lightRequest;
             this.authenticationRequest = authenticationRequest;
+            this.codeVerifier = codeVerifier;
         }
 
         public String getIdpAuthenticationRequestState() {
